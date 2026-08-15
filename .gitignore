@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# ML model weights
+*.pt
+
+# Local databases / generated data
+*.db
+*.csv
+
+# Old/generated frontend
+frontend/dashboard_old/
+
+# Generated Stitch export
+stitch_export/

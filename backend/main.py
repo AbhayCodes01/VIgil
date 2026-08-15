@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from database import get_db, HazardEvent, Node, Base, engine
+from database import get_db, HazardEvent, Node, Base, engine, FleetOperator, Truck, Shipment, ShockEvent
 from datetime import datetime
 from typing import List
 import json, math, numpy as np, cv2, os
@@ -53,6 +53,18 @@ class ConnectionManager:
             self.active.remove(ws)
 
 manager = ConnectionManager()
+
+
+def haversine_km(lat1, lng1, lat2, lng2):
+    """Great-circle distance in km. Shared by /hazards/near and the new
+    shock-event causal-link lookup — was previously defined inline only
+    inside /hazards/near; factored out so both can use it."""
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng/2)**2
+    return R * 2 * math.asin(math.sqrt(a))
+
 
 # --- Routes ---
 
@@ -118,17 +130,10 @@ def get_hazards(db: Session = Depends(get_db)):
 @app.get("/hazards/near")
 def get_hazards_near(lat: float, lng: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
     """Returns confirmed hazards within radius_km of a driver's location."""
-    def haversine(lat1, lng1, lat2, lng2):
-        R = 6371
-        dlat = math.radians(lat2 - lat1)
-        dlng = math.radians(lng2 - lng1)
-        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng/2)**2
-        return R * 2 * math.asin(math.sqrt(a))
-
     all_events = db.query(HazardEvent).filter(HazardEvent.confirmed == 1).all()
     nearby = [
         e for e in all_events
-        if haversine(lat, lng, e.latitude, e.longitude) <= radius_km
+        if haversine_km(lat, lng, e.latitude, e.longitude) <= radius_km
     ]
     return [
         {
@@ -137,7 +142,7 @@ def get_hazards_near(lat: float, lng: float, radius_km: float = 5.0, db: Session
             "confidence":   e.confidence,
             "latitude":     e.latitude,
             "longitude":    e.longitude,
-            "distance_km":  round(haversine(lat, lng, e.latitude, e.longitude), 2),
+            "distance_km":  round(haversine_km(lat, lng, e.latitude, e.longitude), 2),
             "timestamp":    e.timestamp.isoformat(),
         }
         for e in nearby
@@ -186,6 +191,129 @@ def get_stats(db: Session = Depends(get_db)):
         "total_confirmed": total,
         "by_type": {row[0]: row[1] for row in by_type}
     }
+
+
+# ---------------------------------------------------------------------------
+# NEW — v2 cargo-protection endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/shipments/demo")
+def create_demo_shipment(db: Session = Depends(get_db)):
+    """
+    Creates (or reuses) one demo fleet/truck/shipment chain so the simulator
+    has a real shipment_id to attach shock events to, without you having to
+    manually build fleet/truck records first. Safe to call repeatedly —
+    reuses the same demo fleet/truck if they already exist.
+    """
+    fleet = db.query(FleetOperator).filter(FleetOperator.name == "Demo Fleet").first()
+    if not fleet:
+        fleet = FleetOperator(name="Demo Fleet", contact_email="demo@vigilcloud.dev")
+        db.add(fleet); db.commit(); db.refresh(fleet)
+
+    truck = db.query(Truck).filter(Truck.plate_no == "DEMO-TRUCK-01").first()
+    if not truck:
+        truck = Truck(plate_no="DEMO-TRUCK-01", fleet_operator_id=fleet.id)
+        db.add(truck); db.commit(); db.refresh(truck)
+
+    shipment = Shipment(
+        fleet_operator_id = fleet.id,
+        truck_id          = truck.id,
+        cargo_type        = "pharma",
+        cargo_value_inr   = 850000,
+        is_cold_chain     = 1,
+        temp_band_min     = 2,
+        temp_band_max     = 8,
+        route_start       = "Delhi",
+        route_end         = "Agra",
+        status            = "in_transit",
+    )
+    db.add(shipment); db.commit(); db.refresh(shipment)
+
+    return {"shipment_id": shipment.id, "truck_id": truck.id, "fleet_operator_id": fleet.id}
+
+
+@app.post("/ingest/shock")
+async def ingest_shock_event(payload: dict, db: Session = Depends(get_db)):
+    """
+    Receives an ADXL345 g-force reading from a truck-mounted node.
+
+    Severity thresholds below are placeholders — Section 5.3 of the SRS /
+    ml/README.md flags that these should come from the MATLAB quarter-car
+    simulation, not be hand-picked. Swap them out once that's built.
+
+    Also attempts to causally link the shock to the nearest confirmed
+    HazardEvent within 200m / 30s, same idea as ShockEvent.nearby_hazard_id
+    in the schema.
+    """
+    g_force = payload.get("g_force", 0.0)
+
+    if g_force >= 4.0:
+        severity = "severe"
+    elif g_force >= 2.0:
+        severity = "moderate"
+    else:
+        severity = "minor"
+
+    lat = payload.get("latitude", 0.0)
+    lng = payload.get("longitude", 0.0)
+    now = datetime.utcnow()
+
+    nearby_hazard_id = None
+    recent_hazards = db.query(HazardEvent)\
+                        .filter(HazardEvent.confirmed == 1)\
+                        .order_by(HazardEvent.timestamp.desc())\
+                        .limit(20)\
+                        .all()
+    for h in recent_hazards:
+        dist_km = haversine_km(lat, lng, h.latitude, h.longitude)
+        time_diff_s = abs((now - h.timestamp).total_seconds())
+        if dist_km <= 0.2 and time_diff_s <= 30:
+            nearby_hazard_id = h.id
+            break
+
+    shock = ShockEvent(
+        truck_node_id     = payload.get("truck_node_id", "unknown"),
+        shipment_id       = payload.get("shipment_id"),
+        g_force           = g_force,
+        severity          = severity,
+        latitude          = lat,
+        longitude         = lng,
+        nearby_hazard_id  = nearby_hazard_id,
+        timestamp         = now,
+    )
+    db.add(shock)
+    db.commit()
+    db.refresh(shock)
+
+    return {
+        "status": "saved",
+        "shock_id": shock.id,
+        "severity": severity,
+        "linked_hazard_id": nearby_hazard_id,
+    }
+
+
+@app.get("/shipments/{shipment_id}/shocks")
+def get_shipment_shocks(shipment_id: int, db: Session = Depends(get_db)):
+    """Shock-event history for one shipment — used by the fleet dashboard's
+    per-shipment panel (SRS FR-FLEET-2)."""
+    shocks = db.query(ShockEvent)\
+               .filter(ShockEvent.shipment_id == shipment_id)\
+               .order_by(ShockEvent.timestamp.desc())\
+               .all()
+    return [
+        {
+            "id": s.id,
+            "truck_node_id": s.truck_node_id,
+            "g_force": s.g_force,
+            "severity": s.severity,
+            "latitude": s.latitude,
+            "longitude": s.longitude,
+            "nearby_hazard_id": s.nearby_hazard_id,
+            "timestamp": s.timestamp.isoformat(),
+        }
+        for s in shocks
+    ]
 
 
 @app.websocket("/ws/live")
