@@ -1,55 +1,52 @@
-import argparse
 import cv2
 from ultralytics import YOLO
 
+MODEL_PATH = "edge/yolo11n.pt"
+CONFIDENCE = 0.55
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--weights",
-        default="best.pt",
-        help="Path to YOLO weights"
-    )
-    args = parser.parse_args()
+ROAD_CLASSES = {
+    0,  # person
+    2,  # car
+    3,  # motorcycle
+    5,  # bus
+    7   # truck
+}
 
-    print(f"Loading YOLO model: {args.weights}")
+print("Loading YOLO11n...")
+model = YOLO(MODEL_PATH)
 
-    model = YOLO(args.weights)
+print("Model loaded.")
+print("Starting camera...")
 
-    print("✓ YOLO model loaded")
-    print("✓ Starting live camera...")
-    print("Press Q to quit.")
+camera = cv2.VideoCapture(0)
 
-    cap = cv2.VideoCapture(0)
+if not camera.isOpened():
+    print("ERROR: Could not open camera.")
+    exit()
 
-    if not cap.isOpened():
-        print("ERROR: Could not open camera.")
-        return
+print("Camera opened successfully.")
+print("Press Q to quit.")
 
-    while True:
-        ret, frame = cap.read()
+while True:
+    success, frame = camera.read()
 
-        if not ret:
-            print("ERROR: Could not read frame.")
-            break
+    if not success:
+        print("ERROR: Could not read frame.")
+        break
 
-        results = model.predict(
-            source=frame,
-            conf=0.4,
-            iou=0.5,
-            verbose=False
-        )
+    results = model.predict(
+    source=frame,
+    conf=CONFIDENCE,
+    classes=list(ROAD_CLASSES),
+    verbose=False
+)
 
-        annotated_frame = results[0].plot()
+    annotated_frame = results[0].plot()
 
-        cv2.imshow("VigilCloud - Live Pothole Detection", annotated_frame)
+    cv2.imshow("VigilCloud - Multihazard Object Detection", annotated_frame)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
 
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
+camera.release()
+cv2.destroyAllWindows()

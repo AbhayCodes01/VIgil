@@ -370,15 +370,42 @@ function App() {
                 </span>
               </div>
 
-              <div className="camera-placeholder">
-                <Car size={42} />
+           <div className="camera-live-container">
+  <div className="camera-live-header">
+    <div>
+      <span className="camera-id">CAM-042</span>
+      <span className="camera-vehicle">VH-042 · NH-44</span>
+    </div>
 
-                <strong>LIVE CAMERA STREAM</strong>
+    <div className="camera-live-status">
+      <span className="camera-live-dot" />
+      LIVE
+    </div>
+  </div>
 
-                <span>VH-042 · NH-44</span>
+  <div className="camera-live-video">
+    <img
+      src="http://localhost:8001/camera/stream"
+      alt="VigilCloud live camera feed"
+    />
 
-                <div className="scan-line" />
-              </div>
+    <div className="camera-overlay-top">
+      <span>EDGE AI</span>
+      <span>YOLO INFERENCE</span>
+    </div>
+
+    <div className="camera-overlay-bottom">
+      <span>CAM-042</span>
+      <span>LIVE</span>
+    </div>
+  </div>
+
+  <div className="camera-live-footer">
+    <span>YOLO EDGE</span>
+    <span>LIVE INFERENCE</span>
+    <span>CAMERA 01</span>
+  </div>
+</div>
 
               <div className="camera-bottom">
                 <span>YOLO EDGE</span>
